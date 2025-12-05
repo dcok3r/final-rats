@@ -1,40 +1,43 @@
 
 library(tidyverse)
 library(ggplot2)
-library(brms)
-library(sjPlot)
+library(ggbeeswarm)
+library(cmdstanr)
+library(bayesplot)
+library(factoextra)
+
+#library(tidybayes)
 
 options(mc.cores = parallel::detectCores())
 
-## Load and subset data
+## Load data
 df<-read.csv("~/NRES 746/746 Project/2015_05_06_ExternalMorphology_Middens_Distance_Adults_3species.csv",
              header=TRUE,na.strings=c("",NA))
+df<-df%>%filter(Species!='hybrid')
+df$Sex<-factor(df$Sex,levels=c("Female","Male"))
+df$Species<-factor(df$Species,levels=c("fuscipes","macrotis"))
 
-rats<-df%>%filter(Species!='hybrid')
-
-## Processing ====
-for (x in 1:nrow(rats)) {
-  if(rats$Zone.Number[x]==3){
-    rats$dist[x]<-0
-  } else if(rats$Zone.Number[x]==2 | rats$Zone.Number[x]==4 ){
-    rats$dist[x]<-1
+for (x in 1:nrow(df)) {
+  if(df$Zone.Number[x]==3){
+    df$dist[x]<-0
+  } else if(df$Zone.Number[x]==2 | df$Zone.Number[x]==4 ){
+    df$dist[x]<-1
   } else {
-    rats$dist[x]<-2
-  }
+    df$dist[x]<-2   }
 }
 
-rats$male<-ifelse(rats$Sex=="Male",1,0)
+df$male<-as.integer(df$Sex)-1
 
-rats$macrotis<-ifelse(rats$Species=="macrotis",1,0)
-
-rats<-rats%>%mutate(across(c(5,8:10),scale))
+df$macrotis<-as.integer(df$Species)-1
 
 
 ## PCA ====
-
 #see if pregnant females should be excluded
 df$Pregnant<-ifelse(df$Sex=="Female" & is.na(df$Pregnant),"no",df$Pregnant)
 with(df%>%filter(Sex=="Female"),t.test(Weight..gram.~factor(Pregnant))) #no difference in weight
+#-- -- --
+
+rats<-df%>%mutate(across(c(5,8:10),scale))
 
 rats2<-rats%>%subset(select=c("ID","Weight..gram.","Ear..mm.","Rostrum..mm.","Hind.Foot..mm."))
 
@@ -53,7 +56,7 @@ rats2<-cbind(rats2,PC$scores)
 
 rats3<-rats%>%left_join(rats2)
 
-## Morphology predictive model ====
+## Morphology (PC) model ====
 
 # look at some possible interactions- do these make sense to include?
 ggplot(rats3,aes(x=male,y=Comp.1,color=factor(macrotis))) + geom_jitter() + 
@@ -62,109 +65,623 @@ ggplot(rats3,aes(x=dist,y=Comp.1,color=factor(macrotis))) + geom_jitter() +
   geom_smooth(method="lm")
 ggplot(rats3,aes(x=dist,y=Comp.1,color=factor(male))) + geom_jitter() + geom_smooth(method="lm")
 
+## create model matrix for PC model
+PCdf<-rats3%>%reframe(Comp.1,species=as.integer(Species),macrotis,male,dist,
+              macrotis_distance=macrotis*dist, macrotis_male=macrotis*male,
+              male_distance=male*dist)
 
-PCmodel <- brm( Comp.1 ~ male + macrotis + dist + male:macrotis + dist:macrotis + dist:male,
-  data = rats3,
-  family = gaussian(),
-  chains = 4,
-  cores = 6,
-  iter = 4000
+PCdf<-na.omit(PCdf)
+PCdf$macrotis<-NULL
+
+#list of stan inputs
+PC_df <- list(
+  N = nrow(PCdf), K = 5, X = PCdf[,c(3:7)], y = PCdf$Comp.1, n_sp = nlevels(factor(PCdf$species)),
+  species = PCdf$species  )
+
+stanmodel<-cmdstan_model("rats_stan.stan")
+
+fit_PC <- stanmodel$sample(
+  data=PC_df, chains = 6, parallel_chains = 6,  
+  iter_warmup = 2000, iter_sampling = 4000
 )
 
-summary(PCmodel)
+PCsummary<-fit_PC$summary(); PCsummary
 
-stancode(PCmodel)
+PCsummary2<-as.data.frame(PCsummary)
+PCsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
+                       "mac_dist","mac_male","male_dist", "sigma")
 
-male=1
-macrotis=1
-dist=2
-0.56+(1.47*male)-(1.35*macrotis)-(0.16*dist)-(0.69*male*macrotis)-(0.14*dist*macrotis)-
-  (0.23*male*dist)
+draws_PC<-fit_PC$draws(format="df") # "lp","alpha.fus","alpha.mac","male","dist",
+                                    # "mac_dist","mac_male","male_dist", "sigma"
 
-plot_model(model, type="pred",ppd=T,ci.lvl=0.90,terms = c("dist","male","macrotis")) + 
-  ylab("Principal component")
+mcmc_trace(draws_PC, pars = c("alpha[1]","alpha[2]","beta[1]","beta[2]",
+                              "beta[3]","beta[4]","beta[5]","sigma"))
+
+# --- FUSCIPES  PC PLOT ----
+draws_PC2<-draws_PC[1:3000,] #subset draws for shorter plotting times
+
+# Warning: plots take a bit of time to run and appear (< ~1min)
+ggplot(rats3%>%filter(Species=="fuscipes"),aes(x=dist,y=Comp.1,color=factor(Sex))) + 
+  geom_quasirandom(width=0.2) +
+  geom_abline(intercept=draws_PC2$`alpha[1]`, #fus female intercept
+               slope=draws_PC2$`beta[2]`, # distance beta
+               alpha=0.05,color="pink") +
+  geom_abline(intercept=draws_PC2$`alpha[1]`+ draws_PC2$`beta[1]`, #fus male intercept
+               slope=draws_PC2$`beta[2]`+ draws_PC2$`beta[5]`, # distance + male:dist
+               alpha=0.05,color="lightblue") +
+  geom_abline(intercept=PCsummary2$mean[PCsummary2$variable=="alpha.fus"], #fem fus meanline
+              slope=PCsummary2$mean[PCsummary2$variable=="dist"],
+              linewidth=1,color="darkred") +
+  scale_color_manual(values=c("red","blue"))+
+  geom_abline(intercept=PCsummary2$mean[PCsummary2$variable=="alpha.fus"]+ #male fus meanline
+                PCsummary2$mean[PCsummary2$variable=="male"], 
+              slope=PCsummary2$mean[PCsummary2$variable=="dist"]+
+                PCsummary2$mean[PCsummary2$variable=="male_dist"],
+              linewidth=1,color="darkblue") +
+  scale_x_continuous(breaks = c(0,1,2), 
+                      labels = c("sympatry","near\nsympatry","allopatry") ) +
+  scale_y_continuous(limits=c(-4,4.5),breaks=seq(-4,4.5,by=1)) +
+  coord_cartesian(xlim = c(-0.25, 2.25)) +
+  ylab ("Principal component 1") + 
+  guides(color = guide_legend(title = "Sex")) +
+  theme_minimal() + 
+  theme(  panel.grid.minor = element_line(size=0.5),
+          plot.title = element_text(hjust = 0.5),
+          panel.border = element_rect(color = "grey", fill = NA),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size=12,hjust=0.5),
+          legend.text = element_text(size=12),
+          title = element_text(size=15),
+          axis.text.x = element_text(size=13),
+          axis.text.y = element_text(size=13),
+          strip.background = element_rect(fill = "lightgrey", linetype = "solid"),
+          strip.text = element_text(size=14,face="italic") ) + 
+    facet_wrap(~Species) #put box around title
+    # save as image... dims 650 x 600 
+
+# --- MACROTIS PC PLOT ----
+
+ggplot(rats3%>%filter(Species=="macrotis"),aes(x=dist,y=Comp.1,color=factor(Sex))) + 
+  geom_quasirandom(width=0.3) +
+  geom_abline (intercept=draws_PC2$`alpha[2]`, #mac female intercept
+                slope=draws_PC2$`beta[2]`+
+                draws_PC2$`beta[3]`,  # slope=distance + macrotis:dist
+               alpha=0.05,color="pink") +
+  geom_abline (intercept=draws_PC2$`alpha[2]`+ draws_PC2$`beta[1]`+
+                draws_PC2$`beta[4]` , #mac male intercept
+                slope=draws_PC2$`beta[2]`+ draws_PC2$`beta[3]`+
+                draws_PC2$`beta[5]`, # distance + male:dist
+               alpha=0.05,color="lightblue") +
+  geom_abline(intercept=PCsummary2$mean[PCsummary2$variable=="alpha.mac"], #fem mac meanline
+              slope=PCsummary2$mean[PCsummary2$variable=="dist"]+
+                    PCsummary2$mean[PCsummary2$variable=="mac_dist"],
+              linewidth=1,color="darkred") +
+  scale_color_manual(values=c("red","blue"))+
+  geom_abline(intercept=PCsummary2$mean[PCsummary2$variable=="alpha.mac"]+ #male mac meanline
+                    PCsummary2$mean[PCsummary2$variable=="mac_male"]+
+                    PCsummary2$mean[PCsummary2$variable=="male"], 
+              slope=PCsummary2$mean[PCsummary2$variable=="dist"]+
+                    PCsummary2$mean[PCsummary2$variable=="mac_dist"]+
+                    PCsummary2$mean[PCsummary2$variable=="male_dist"],
+              linewidth=1,color="darkblue") +
+  scale_x_continuous(breaks = c(0,1,2), 
+                     labels = c("sympatry","near\nsympatry","allopatry") ) +
+  scale_y_continuous(limits=c(-4,4.5),breaks=seq(-4,4.5,by=1)) +
+  coord_cartesian(xlim = c(-0.25, 2.25)) +
+  ylab ("Principal component 1") + 
+  guides(color = guide_legend(title = "Sex")) +
+  theme_minimal() + 
+  theme(  panel.grid.minor = element_line(size=0.5),
+          plot.title = element_text(hjust = 0.5),
+          panel.border = element_rect(color = "grey", fill = NA),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size=12,hjust=0.5),
+          legend.text = element_text(size=12),
+          title = element_text(size=15),
+          axis.text.x = element_text(size=13),
+          axis.text.y = element_text(size=13),
+          strip.background = element_rect(fill = "lightgrey", linetype = "solid"),
+          strip.text = element_text(size=14,face="italic") ) + 
+  facet_wrap(~Species)
+
+  
+
+# look at the difference between bayesian and frequentist estimates
+ggplot(rats3%>%filter(Species=="fuscipes"),aes(x=dist,y=Comp.1,color=factor(Sex))) + 
+  geom_quasirandom(width=0.2) +
+  geom_abline(intercept=PCsummary2$mean[PCsummary2$variable=="alpha.fus"], #fem fus meanline
+              slope=PCsummary2$mean[PCsummary2$variable=="dist"],
+              linewidth=1,color="darkred") +
+  geom_abline(intercept=PCsummary2$mean[PCsummary2$variable=="alpha.fus"]+ #male fus meanline
+                PCsummary2$mean[PCsummary2$variable=="male"], 
+              slope=PCsummary2$mean[PCsummary2$variable=="dist"]+
+                PCsummary2$mean[PCsummary2$variable=="male_dist"],
+              linewidth=1,color="darkblue") +
+        geom_smooth(method='lm')
 
 
-library(tidybayes)
-model %>% spread_draws(r_condition[condition,term]) %>%
-  head(10)
-
-rats3 %>%
-  add_predicted_draws(model) %>%
-  ggplot(aes(x = dist, y = Comp.1, color = factor(male), fill = factor(male))) +
-  stat_lineribbon(aes(y = .prediction), .width = c(.95), alpha = 0.1) +
-  geom_jitter(data=rats3) +
-  facet_grid(. ~ macrotis)
-
-
-rats3 %>%
-  add_epred_draws(model, ndraws = 200) %>%
-  ggplot(aes(x = dist, y = Comp.1, color = factor(male))) +
-  geom_line(aes(y = .epred, group = paste(male, .draw)), alpha = 0.25) +
-  geom_jitter(data = rats3) +
-  facet_grid(. ~ macrotis)
-
-
+ggplot(rats3%>%filter(Species=="macrotis"),aes(x=dist,y=Comp.1,color=factor(Sex))) + 
+  geom_quasirandom(width=0.3) +
+  geom_abline(intercept=PCsummary2$mean[PCsummary2$variable=="alpha.mac"], #fem mac meanline
+              slope=PCsummary2$mean[PCsummary2$variable=="dist"]+
+                PCsummary2$mean[PCsummary2$variable=="mac_dist"],
+              linewidth=1,color="darkred") +
+  geom_abline(intercept=PCsummary2$mean[PCsummary2$variable=="alpha.mac"]+ #male mac meanline
+                PCsummary2$mean[PCsummary2$variable=="male"]+
+                PCsummary2$mean[PCsummary2$variable=="mac_male"], 
+              slope=PCsummary2$mean[PCsummary2$variable=="dist"]+
+                PCsummary2$mean[PCsummary2$variable=="mac_dist"]+
+                PCsummary2$mean[PCsummary2$variable=="male_dist"],
+              linewidth=1,color="darkblue") +
+        geom_smooth(method='lm')
 
 
 ## Relative morphology -----------------------------------------------
-  # get mean weight and weight SD for each species in allopatric zones
-df$dist<-NA
-for (x in 1:nrow(df)) {
-  if(df$Zone.Number[x]==3){
-    df$dist[x]<-0
-  } else if(df$Zone.Number[x]==2 | df$Zone.Number[x]==4 ){
-    df$dist[x]<-1
-  } else {
-    df$dist[x]<-2
-  }
-}
+  # get median weight and weight MAD for each species in allopatric zones
 
 rats4<-df%>%filter(Species!='hybrid' & dist==2)%>%group_by(Species)%>%summarize(
-  meanwgt=mean(Weight..gram.,na.rm=T), wgt.sd=sd(Weight..gram.,na.rm=T),
-  meanear=mean(Ear..mm.,na.rm=T), ear.sd=sd(Ear..mm.,na.rm=T),
-  meanfoot=mean(Hind.Foot..mm.,na.rm=T), foot.sd=sd(Hind.Foot..mm.,na.rm=T),
-  meanrost=mean(Rostrum..mm.,na.rm=T), rost.sd=sd(Rostrum..mm.,na.rm=T)  ) %>% 
-  right_join(.,df%>%filter(Species!='hybrid'),by="Species")
+  medwgt=median(Weight..gram.,na.rm=T), wgt.mad=mad(Weight..gram.,na.rm=T),
+  medear=median(Ear..mm.,na.rm=T), ear.mad=mad(Ear..mm.,na.rm=T),
+  medfoot=median(Hind.Foot..mm.,na.rm=T), foot.mad=mad(Hind.Foot..mm.,na.rm=T),
+  medrost=median(Rostrum..mm.,na.rm=T), rost.mad=mad(Rostrum..mm.,na.rm=T)  ) %>% 
+  right_join(.,df%>%filter(Species!='hybrid'),by=c("Species"))
 
-rats4$male<-ifelse(rats4$Sex=="Male",1,0)
+# add morphology z-scaled within species
+rats4$z_weight<-(rats4$Weight..gram.-rats4$medwgt)/rats4$wgt.mad
+rats4$z_ear<-(rats4$Ear..mm.-rats4$medear)/rats4$ear.mad
+rats4$z_foot<-(rats4$Hind.Foot..mm.-rats4$medfoot)/rats4$foot.mad
+rats4$z_rost<-(rats4$Rostrum..mm.-rats4$medrost)/rats4$rost.mad
 
-rats4$macrotis<-ifelse(rats4$Species=="macrotis",1,0)
+# --- Z_Weight model ----
+ZWgtMM<-rats4%>%reframe(z_weight,species=as.integer(Species),macrotis,male,dist,
+                macrotis_distance=macrotis*dist, macrotis_male=macrotis*male,
+                male_distance=male*dist)
+ZWgtMM<-na.omit(ZWgtMM)
+ZWgtMM$macrotis<-NULL
 
-  # add morphology z-scaled within species in allopatric zone
-rats4$z_weight<-(rats4$Weight..gram.-rats4$meanwgt)/rats4$wgt.sd
-rats4$z_ear<-(rats4$Ear..mm.-rats4$meanear)/rats4$ear.sd
-rats4$z_foot<-(rats4$Hind.Foot..mm.-rats4$meanfoot)/rats4$foot.sd
-rats4$z_rost<-(rats4$Rostrum..mm.-rats4$meanrost)/rats4$rost.sd
+#list of stan inputs
+ZWgt_df <- list(
+  N = nrow(ZWgtMM), K = 5, X = ZWgtMM[,c(3:7)], y = ZWgtMM$z_weight, 
+  n_sp = nlevels(factor(ZWgtMM$species)), species = ZWgtMM$species)
+
+#stanmodel<-cmdstan_model("rats_stan.stan")
+
+fit_Zwgt <- stanmodel$sample(
+  data=ZWgt_df, chains = 6, parallel_chains = 6,  
+  iter_warmup = 2000, iter_sampling = 4000 )
+
+Zwgtsummary<-fit_Zwgt$summary(); Zwgtsummary
+
+Zwgtsummary2<-as.data.frame(Zwgtsummary)
+Zwgtsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
+                       "mac_dist","mac_male","male_dist", "sigma")
+
+draws_Zwgt<-fit_Zwgt$draws(format="df")
+
+draws_Zwgt2<-draws_Zwgt[1:3000,] #subset draws
+
+  # Fuscipes
+ggplot(rats4%>%filter(Species=="fuscipes"),aes(x=dist,y=z_weight,color=factor(Sex))) + 
+  geom_quasirandom(width=0.3) +
+  geom_abline(intercept=draws_Zwgt2$`alpha[1]`, #fus female intercept
+              slope=draws_Zwgt2$`beta[2]`, # distance beta
+              alpha=0.05,color="pink") +
+  geom_abline(intercept=draws_Zwgt2$`alpha[1]`+ draws_Zwgt2$`beta[1]`, #fus male intercept
+              slope=draws_Zwgt2$`beta[2]`+ draws_Zwgt2$`beta[5]`, # distance + male:dist
+              alpha=0.05,color="lightblue") +
+  scale_color_manual(values=c("red","blue"))+
+  geom_abline(intercept=Zwgtsummary2$mean[Zwgtsummary2$variable=="alpha.fus"], #fem fus meanline
+              slope=Zwgtsummary2$mean[Zwgtsummary2$variable=="dist"],
+              linewidth=1,color="darkred") +
+  geom_abline(intercept=Zwgtsummary2$mean[Zwgtsummary2$variable=="alpha.fus"]+ #male fus meanline
+                Zwgtsummary2$mean[Zwgtsummary2$variable=="male"], 
+              slope=Zwgtsummary2$mean[Zwgtsummary2$variable=="dist"]+
+                Zwgtsummary2$mean[Zwgtsummary2$variable=="male_dist"],
+              linewidth=1,color="darkblue") +
+  scale_x_continuous(breaks = c(0,1,2), 
+                     labels = c("sympatry","near\nsympatry","allopatry") ) +
+  scale_y_continuous(limits=c(-2.5,3),breaks=seq(-2,3,by=1)) +
+  coord_cartesian(xlim = c(-0.25, 2.25)) +
+  ylab ("Z-scaled weight") + 
+  geom_hline(yintercept=0, linetype="dashed",linewidth=1.5) +
+  guides(color = guide_legend(title = "Sex")) +
+  theme_minimal() + 
+  theme(  panel.grid.minor = element_line(size=0.5),
+          plot.title = element_text(hjust = 0.5),
+          panel.border = element_rect(color = "grey", fill = NA),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size=12,hjust=0.5),
+          legend.text = element_text(size=12),
+          title = element_text(size=15),
+          axis.text.x = element_text(size=13),
+          axis.text.y = element_text(size=13),
+          strip.background = element_rect(fill = "lightgrey", linetype = "solid"),
+          strip.text = element_text(size=14,face="italic") ) + 
+  facet_wrap(~Species)
 
 
-zwgtmodel <- brm(z_weight ~ male + macrotis + dist + male:macrotis + dist:macrotis + dist:male +
-  (1|Year), data = rats4, family = gaussian(), chains = 4, cores = 6, iter = 5000 )
-summary(zwgtmodel)
-plot_model(zwgtmodel, type="pred",ppd=T,ci.lvl=0.95,terms = c("dist","male","macrotis")) + 
-  ylab("z-transformed weight")
+  #Macrotis
+ggplot(rats4%>%filter(Species=="macrotis"),aes(x=dist,y=z_weight,color=factor(Sex))) + 
+  geom_quasirandom(width=0.3) +
+  geom_abline (intercept=draws_Zwgt2$`alpha[2]`, #mac female intercept
+                slope=draws_Zwgt2$`beta[2]`+
+                draws_Zwgt2$`beta[3]`,  # slope=distance + macrotis:dist
+               alpha=0.05,color="pink") +
+  geom_abline (intercept=draws_Zwgt2$`alpha[2]`+ draws_Zwgt2$`beta[1]`+
+                draws_Zwgt2$`beta[4]` , #mac male intercept
+                slope=draws_Zwgt2$`beta[2]`+ draws_Zwgt2$`beta[3]`+
+                draws_Zwgt2$`beta[5]`, # distance + male:dist
+               alpha=0.05,color="lightblue") +
+  scale_color_manual(values=c("red","blue"))+
+  geom_abline(intercept=Zwgtsummary2$mean[Zwgtsummary2$variable=="alpha.mac"], #fem mac meanline
+              slope=Zwgtsummary2$mean[Zwgtsummary2$variable=="dist"]+
+                    Zwgtsummary2$mean[Zwgtsummary2$variable=="mac_dist"],
+              linewidth=1,color="darkred") +
+  geom_abline(intercept=Zwgtsummary2$mean[Zwgtsummary2$variable=="alpha.mac"]+ #male mac meanline
+                    Zwgtsummary2$mean[Zwgtsummary2$variable=="mac_male"]+
+                    Zwgtsummary2$mean[Zwgtsummary2$variable=="male"], 
+              slope=Zwgtsummary2$mean[Zwgtsummary2$variable=="dist"]+
+                    Zwgtsummary2$mean[Zwgtsummary2$variable=="mac_dist"]+
+                    Zwgtsummary2$mean[Zwgtsummary2$variable=="male_dist"],
+              linewidth=1,color="darkblue") +
+  scale_x_continuous(breaks = c(0,1,2), 
+                     labels = c("sympatry","near\nsympatry","allopatry") ) +
+  scale_y_continuous(limits=c(-2.5,3),breaks=seq(-2,3,by=1)) +
+  coord_cartesian(xlim = c(-0.25, 2.25)) +
+  ylab ("Z-scaled weight") + 
+  geom_hline(yintercept=0, linetype="dashed",linewidth=1.5) +
+  guides(color = guide_legend(title = "Sex")) +
+  theme_minimal() + 
+  theme(  panel.grid.minor = element_line(size=0.5),
+          plot.title = element_text(hjust = 0.5),
+          panel.border = element_rect(color = "grey", fill = NA),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size=12,hjust=0.5),
+          legend.text = element_text(size=12),
+          title = element_text(size=15),
+          axis.text.x = element_text(size=13),
+          axis.text.y = element_text(size=13),
+          strip.background = element_rect(fill = "lightgrey", linetype = "solid"),
+          strip.text = element_text(size=14,face="italic") ) + 
+  facet_wrap(~Species)
+
+# --- Z_Ear model ----
+ZearMM<-rats4%>%reframe(z_ear,species=as.integer(Species),macrotis,male,dist,
+                        macrotis_distance=macrotis*dist, macrotis_male=macrotis*male,
+                        male_distance=male*dist)
+ZearMM<-na.omit(ZearMM)
+ZearMM$macrotis<-NULL
+
+#list of stan inputs
+Zear_df <- list(
+  N = nrow(ZearMM), K = 5, X = ZearMM[,c(3:7)], y = ZearMM$z_ear, 
+  n_sp = nlevels(factor(ZearMM$species)), species = ZearMM$species)
+
+#stanmodel<-cmdstan_model("rats_stan.stan")
+
+fit_Zear <- stanmodel$sample(
+  data=Zear_df, chains = 6, parallel_chains = 6,  
+  iter_warmup = 2000, iter_sampling = 4000 )
+
+Zearsummary<-fit_Zear$summary(); Zearsummary
+
+Zearsummary2<-as.data.frame(Zearsummary)
+Zearsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
+                         "mac_dist","mac_male","male_dist", "sigma")
+
+draws_Zear<-fit_Zear$draws(format="df")
+
+draws_Zear2<-draws_Zear[1:3000,] #subset draws
+
+# Fuscipes
+ggplot(rats4%>%filter(Species=="fuscipes"),aes(x=dist,y=z_ear,color=factor(Sex))) + 
+  geom_quasirandom(width=0.3) +
+  geom_abline(intercept=draws_Zear2$`alpha[1]`, #fus female intercept
+              slope=draws_Zear2$`beta[2]`, # distance beta
+              alpha=0.05,color="pink") +
+  geom_abline(intercept=draws_Zear2$`alpha[1]`+ draws_Zear2$`beta[1]`, #fus male intercept
+              slope=draws_Zear2$`beta[2]`+ draws_Zear2$`beta[5]`, # distance + male:dist
+              alpha=0.05,color="lightblue") +
+  scale_color_manual(values=c("red","blue"))+
+  geom_abline(intercept=Zearsummary2$mean[Zearsummary2$variable=="alpha.fus"], #fem fus meanline
+              slope=Zearsummary2$mean[Zearsummary2$variable=="dist"],
+              linewidth=1,color="darkred") +
+  geom_abline(intercept=Zearsummary2$mean[Zearsummary2$variable=="alpha.fus"]+ #male fus meanline
+                Zearsummary2$mean[Zearsummary2$variable=="male"], 
+              slope=Zearsummary2$mean[Zearsummary2$variable=="dist"]+
+                Zearsummary2$mean[Zearsummary2$variable=="male_dist"],
+              linewidth=1,color="darkblue") +
+  scale_x_continuous(breaks = c(0,1,2), 
+                     labels = c("sympatry","near\nsympatry","allopatry") ) +
+  scale_y_continuous(limits=c(-5.5,3),breaks=seq(-5,3,by=1)) +
+  coord_cartesian(xlim = c(-0.25, 2.25)) +
+  ylab ("Z-scaled ear length") + 
+  geom_hline(yintercept=0, linetype="dashed",linewidth=1.5) +
+  guides(color = guide_legend(title = "Sex")) +
+  theme_minimal() + 
+  theme(  panel.grid.minor = element_line(size=0.5),
+          plot.title = element_text(hjust = 0.5),
+          panel.border = element_rect(color = "grey", fill = NA),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size=12,hjust=0.5),
+          legend.text = element_text(size=12),
+          title = element_text(size=15),
+          axis.text.x = element_text(size=13),
+          axis.text.y = element_text(size=13),
+          strip.background = element_rect(fill = "lightgrey", linetype = "solid"),
+          strip.text = element_text(size=14,face="italic") ) + 
+  facet_wrap(~Species) 
 
 
-zearmodel <- brm(z_ear ~ male + macrotis + dist + male:macrotis + dist:macrotis + dist:male,
-  data = rats4, family = gaussian(), chains = 4, cores = 6, iter = 4000 )
-summary(zearmodel)
-plot_model(zearmodel, type="pred",ppd=T,ci.lvl=0.95,terms = c("dist","male","macrotis")) + 
-  ylab("z-transformed ear length")
+#Macrotis
+ggplot(rats4%>%filter(Species=="macrotis"),aes(x=dist,y=z_ear,color=factor(Sex))) + 
+  geom_quasirandom(width=0.3) +
+  geom_abline (intercept=draws_Zear2$`alpha[2]`, #mac female intercept
+               slope=draws_Zear2$`beta[2]`+
+                 draws_Zear2$`beta[3]`,  # slope=distance + macrotis:dist
+               alpha=0.05,color="pink") +
+  geom_abline (intercept=draws_Zear2$`alpha[2]`+ draws_Zear2$`beta[1]`+
+                 draws_Zear2$`beta[4]` , #mac male intercept
+               slope=draws_Zear2$`beta[2]`+ draws_Zear2$`beta[3]`+
+                 draws_Zear2$`beta[5]`, # distance + male:dist
+               alpha=0.05,color="lightblue") +
+  scale_color_manual(values=c("red","blue"))+
+  geom_abline(intercept=Zearsummary2$mean[Zearsummary2$variable=="alpha.mac"], #fem mac meanline
+              slope=Zearsummary2$mean[Zearsummary2$variable=="dist"]+
+                Zearsummary2$mean[Zearsummary2$variable=="mac_dist"],
+              linewidth=1,color="darkred") +
+  geom_abline(intercept=Zearsummary2$mean[Zearsummary2$variable=="alpha.mac"]+ #male mac meanline
+                Zearsummary2$mean[Zearsummary2$variable=="mac_male"]+
+                Zearsummary2$mean[Zearsummary2$variable=="male"], 
+              slope=Zearsummary2$mean[Zearsummary2$variable=="dist"]+
+                Zearsummary2$mean[Zearsummary2$variable=="mac_dist"]+
+                Zearsummary2$mean[Zearsummary2$variable=="male_dist"],
+              linewidth=1,color="darkblue") +
+  scale_x_continuous(breaks = c(0,1,2), 
+                     labels = c("sympatry","near\nsympatry","allopatry") ) +
+  scale_y_continuous(limits=c(-5.5,3),breaks=seq(-5,3,by=1)) +
+  coord_cartesian(xlim = c(-0.25, 2.25)) +
+  ylab ("Z-scaled ear length") + 
+  geom_hline(yintercept=0, linetype="dashed",linewidth=1.5) +
+  guides(color = guide_legend(title = "Sex")) +
+  theme_minimal() + 
+  theme(  panel.grid.minor = element_line(size=0.5),
+          plot.title = element_text(hjust = 0.5),
+          panel.border = element_rect(color = "grey", fill = NA),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size=12,hjust=0.5),
+          legend.text = element_text(size=12),
+          title = element_text(size=15),
+          axis.text.x = element_text(size=13),
+          axis.text.y = element_text(size=13),
+          strip.background = element_rect(fill = "lightgrey", linetype = "solid"),
+          strip.text = element_text(size=14,face="italic") ) + 
+  facet_wrap(~Species) 
+
+# --- Z_Foot model ----
+ZfootMM<-rats4%>%reframe(z_foot,species=as.integer(Species),macrotis,male,dist,
+                         macrotis_distance=macrotis*dist, macrotis_male=macrotis*male,
+                         male_distance=male*dist)
+ZfootMM<-na.omit(ZfootMM)
+ZfootMM$macrotis<-NULL
+
+#list of stan inputs
+Zfoot_df <- list(
+  N = nrow(ZfootMM), K = 5, X = ZfootMM[,c(3:7)], y = ZfootMM$z_foot, 
+  n_sp = nlevels(factor(ZfootMM$species)), species = ZfootMM$species)
+
+#stanmodel<-cmdstan_model("rats_stan.stan")
+
+fit_Zfoot <- stanmodel$sample(
+  data=Zfoot_df, chains = 6, parallel_chains = 6,  
+  iter_warmup = 2000, iter_sampling = 4000 )
+
+Zfootsummary<-fit_Zfoot$summary(); Zfootsummary
+
+Zfootsummary2<-as.data.frame(Zfootsummary)
+Zfootsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
+                          "mac_dist","mac_male","male_dist", "sigma")
+
+draws_Zfoot<-fit_Zfoot$draws(format="df")
+
+draws_Zfoot2<-draws_Zfoot[1:3000,] #subset draws
+
+  # fuscipes
+ggplot(rats4%>%filter(Species=="fuscipes"),aes(x=dist,y=z_foot,color=factor(Sex))) + 
+  geom_quasirandom(width=0.3) +
+  geom_abline(intercept=draws_Zfoot2$`alpha[1]`, #fus female intercept
+              slope=draws_Zfoot2$`beta[2]`, # distance beta
+              alpha=0.05,color="pink") +
+  geom_abline(intercept=draws_Zfoot2$`alpha[1]`+ draws_Zfoot2$`beta[1]`, #fus male intercept
+              slope=draws_Zfoot2$`beta[2]`+ draws_Zfoot2$`beta[5]`, # distance + male:dist
+              alpha=0.05,color="lightblue") +
+  scale_color_manual(values=c("red","blue"))+
+  geom_abline(intercept=Zfootsummary2$mean[Zfootsummary2$variable=="alpha.fus"], #fem fus meanline
+              slope=Zfootsummary2$mean[Zfootsummary2$variable=="dist"],
+              linewidth=1,color="darkred") +
+  geom_abline(intercept=Zfootsummary2$mean[Zfootsummary2$variable=="alpha.fus"]+ #male fus meanline
+                Zfootsummary2$mean[Zfootsummary2$variable=="male"], 
+              slope=Zfootsummary2$mean[Zfootsummary2$variable=="dist"]+
+                Zfootsummary2$mean[Zfootsummary2$variable=="male_dist"],
+              linewidth=1,color="darkblue") +
+  scale_x_continuous(breaks = c(0,1,2), 
+                     labels = c("sympatry","near\nsympatry","allopatry") ) +
+  scale_y_continuous(limits=c(-3.5,6),breaks=seq(-3,6,by=1)) +
+  coord_cartesian(xlim = c(-0.25, 2.25)) +
+  ylab ("Z-scaled hind foot length") + 
+  geom_hline(yintercept=0, linetype="dashed",linewidth=1.5) +
+  guides(color = guide_legend(title = "Sex")) +
+  theme_minimal() + 
+  theme(  panel.grid.minor = element_line(size=0.5),
+          plot.title = element_text(hjust = 0.5),
+          panel.border = element_rect(color = "grey", fill = NA),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size=12,hjust=0.5),
+          legend.text = element_text(size=12),
+          title = element_text(size=15),
+          axis.text.x = element_text(size=13),
+          axis.text.y = element_text(size=13),
+          strip.background = element_rect(fill = "lightgrey", linetype = "solid"),
+          strip.text = element_text(size=14,face="italic") ) + 
+  facet_wrap(~Species) 
+
+  # macrotis
+ggplot(rats4%>%filter(Species=="macrotis"),aes(x=dist,y=z_foot,color=factor(Sex))) + 
+  geom_quasirandom(width=0.3) +
+  geom_abline (intercept=draws_Zfoot2$`alpha[2]`, #mac female intercept
+               slope=draws_Zfoot2$`beta[2]`+
+                 draws_Zfoot2$`beta[3]`,  # slope=distance + macrotis:dist
+               alpha=0.05,color="pink") +
+  geom_abline (intercept=draws_Zfoot2$`alpha[2]`+ draws_Zfoot2$`beta[1]`+
+                 draws_Zfoot2$`beta[4]` , #mac male intercept
+               slope=draws_Zfoot2$`beta[2]`+ draws_Zfoot2$`beta[3]`+
+                 draws_Zfoot2$`beta[5]`, # distance + male:dist
+               alpha=0.05,color="lightblue") +
+  scale_color_manual(values=c("red","blue"))+
+  geom_abline(intercept=Zfootsummary2$mean[Zfootsummary2$variable=="alpha.mac"], #fem mac meanline
+              slope=Zfootsummary2$mean[Zfootsummary2$variable=="dist"]+
+                Zfootsummary2$mean[Zfootsummary2$variable=="mac_dist"],
+              linewidth=1,color="darkred") +
+  geom_abline(intercept=Zfootsummary2$mean[Zfootsummary2$variable=="alpha.mac"]+ #male mac meanline
+                Zfootsummary2$mean[Zfootsummary2$variable=="mac_male"]+
+                Zfootsummary2$mean[Zfootsummary2$variable=="male"], 
+              slope=Zfootsummary2$mean[Zfootsummary2$variable=="dist"]+
+                Zfootsummary2$mean[Zfootsummary2$variable=="mac_dist"]+
+                Zfootsummary2$mean[Zfootsummary2$variable=="male_dist"],
+              linewidth=1,color="darkblue") +
+  scale_x_continuous(breaks = c(0,1,2), 
+                     labels = c("sympatry","near\nsympatry","allopatry") ) +
+  scale_y_continuous(limits=c(-3.5,6),breaks=seq(-3,6,by=1)) +
+  coord_cartesian(xlim = c(-0.25, 2.25)) +
+  ylab ("Z-scaled hind foot length") + 
+  geom_hline(yintercept=0, linetype="dashed",linewidth=1.5) +
+  guides(color = guide_legend(title = "Sex")) +
+  theme_minimal() + 
+  theme(  panel.grid.minor = element_line(size=0.5),
+          plot.title = element_text(hjust = 0.5),
+          panel.border = element_rect(color = "grey", fill = NA),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size=12,hjust=0.5),
+          legend.text = element_text(size=12),
+          title = element_text(size=15),
+          axis.text.x = element_text(size=13),
+          axis.text.y = element_text(size=13),
+          strip.background = element_rect(fill = "lightgrey", linetype = "solid"),
+          strip.text = element_text(size=14,face="italic") ) + 
+  facet_wrap(~Species)
 
 
-zfootmodel <- brm(z_foot ~ male + macrotis + dist + male:macrotis + dist:macrotis + dist:male,
-  data = rats4, family = gaussian(), chains = 4, cores = 6, iter = 4000 )
-summary(zfootmodel)
-plot_model(zfootmodel, type="pred",ppd=T,ci.lvl=0.95,terms = c("dist","male","macrotis")) + 
-  ylab("z-transformed hindfoot length")
+# --- Z_Rostrum model ----
+ZrostMM<-rats4%>%reframe(z_rost,species=as.integer(Species),macrotis,male,dist,
+                         macrotis_distance=macrotis*dist, macrotis_male=macrotis*male,
+                         male_distance=male*dist)
+ZrostMM<-na.omit(ZrostMM)
+ZrostMM$macrotis<-NULL
 
+#list of stan inputs
+Zrost_df <- list(
+  N = nrow(ZrostMM), K = 5, X = ZrostMM[,c(3:7)], y = ZrostMM$z_rost, 
+  n_sp = nlevels(factor(ZrostMM$species)), species = ZrostMM$species)
 
-zrostmodel <- brm(z_rost ~ male + macrotis + dist + male:macrotis + dist:macrotis + dist:male,
-  data = rats4, family = gaussian(), chains = 4, cores = 6, iter = 4000 )
-summary(zrostmodel)
-plot_model(zrostmodel, type="pred",ppd=T,ci.lvl=0.95,terms = c("dist","male","macrotis")) + 
-  ylab("z-transformed rostrum length")
+#stanmodel<-cmdstan_model("rats_stan.stan")
 
+fit_Zrost <- stanmodel$sample(
+  data=Zrost_df, chains = 6, parallel_chains = 6,  
+  iter_warmup = 2000, iter_sampling = 4000 )
+
+Zrostsummary<-fit_Zrost$summary(); Zrostsummary
+
+Zrostsummary2<-as.data.frame(Zrostsummary)
+Zrostsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
+                          "mac_dist","mac_male","male_dist", "sigma")
+
+draws_Zrost<-fit_Zrost$draws(format="df")
+
+draws_Zrost2<-draws_Zrost[1:3000,] #subset draws
+
+# fuscipes
+ggplot(rats4%>%filter(Species=="fuscipes"),aes(x=dist,y=z_rost,color=factor(Sex))) + 
+  geom_quasirandom(width=0.3) +
+  geom_abline(intercept=draws_Zrost2$`alpha[1]`, #fus female intercept
+              slope=draws_Zrost2$`beta[2]`, # distance beta
+              alpha=0.05,color="pink") +
+  geom_abline(intercept=draws_Zrost2$`alpha[1]`+ draws_Zrost2$`beta[1]`, #fus male intercept
+              slope=draws_Zrost2$`beta[2]`+ draws_Zrost2$`beta[5]`, # distance + male:dist
+              alpha=0.05,color="lightblue") +
+  scale_color_manual(values=c("red","blue"))+
+  geom_abline(intercept=Zrostsummary2$mean[Zrostsummary2$variable=="alpha.fus"], #fem fus meanline
+              slope=Zrostsummary2$mean[Zrostsummary2$variable=="dist"],
+              linewidth=1,color="darkred") +
+  geom_abline(intercept=Zrostsummary2$mean[Zrostsummary2$variable=="alpha.fus"]+ #male fus meanline
+                Zrostsummary2$mean[Zrostsummary2$variable=="male"], 
+              slope=Zrostsummary2$mean[Zrostsummary2$variable=="dist"]+
+                Zrostsummary2$mean[Zrostsummary2$variable=="male_dist"],
+              linewidth=1,color="darkblue") +
+  scale_x_continuous(breaks = c(0,1,2), 
+                     labels = c("sympatry","near\nsympatry","allopatry") ) +
+  scale_y_continuous(limits=c(-2,4),breaks=seq(-2,4,by=1)) +
+  coord_cartesian(xlim = c(-0.25, 2.25)) +
+  ylab ("Z-scaled rostrum width") + 
+  geom_hline(yintercept=0, linetype="dashed",linewidth=1.5) +
+  guides(color = guide_legend(title = "Sex")) +
+  theme_minimal() + 
+  theme(  panel.grid.minor = element_line(size=0.5),
+          plot.title = element_text(hjust = 0.5),
+          panel.border = element_rect(color = "grey", fill = NA),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size=12,hjust=0.5),
+          legend.text = element_text(size=12),
+          title = element_text(size=15),
+          axis.text.x = element_text(size=13),
+          axis.text.y = element_text(size=13),
+          strip.background = element_rect(fill = "lightgrey", linetype = "solid"),
+          strip.text = element_text(size=14,face="italic") ) + 
+  facet_wrap(~Species)
+
+# macrotis
+ggplot(rats4%>%filter(Species=="macrotis"),aes(x=dist,y=z_rost,color=factor(Sex))) + 
+  geom_quasirandom(width=0.3) +
+  geom_abline (intercept=draws_Zrost2$`alpha[2]`, #mac female intercept
+               slope=draws_Zrost2$`beta[2]`+
+                 draws_Zrost2$`beta[3]`,  # slope=distance + macrotis:dist
+               alpha=0.05,color="pink") +
+  geom_abline (intercept=draws_Zrost2$`alpha[2]`+ draws_Zrost2$`beta[1]`+
+                 draws_Zrost2$`beta[4]` , #mac male intercept
+               slope=draws_Zrost2$`beta[2]`+ draws_Zrost2$`beta[3]`+
+                 draws_Zrost2$`beta[5]`, # distance + male:dist
+               alpha=0.05,color="lightblue") +
+  scale_color_manual(values=c("red","blue"))+
+  geom_abline(intercept=Zrostsummary2$mean[Zrostsummary2$variable=="alpha.mac"], #fem mac meanline
+              slope=Zrostsummary2$mean[Zrostsummary2$variable=="dist"]+
+                Zrostsummary2$mean[Zrostsummary2$variable=="mac_dist"],
+              linewidth=1,color="darkred") +
+  geom_abline(intercept=Zrostsummary2$mean[Zrostsummary2$variable=="alpha.mac"]+ #male mac meanline
+                Zrostsummary2$mean[Zrostsummary2$variable=="mac_male"]+
+                Zrostsummary2$mean[Zrostsummary2$variable=="male"], 
+              slope=Zrostsummary2$mean[Zrostsummary2$variable=="dist"]+
+                Zrostsummary2$mean[Zrostsummary2$variable=="mac_dist"]+
+                Zrostsummary2$mean[Zrostsummary2$variable=="male_dist"],
+              linewidth=1,color="darkblue") +
+  scale_x_continuous(breaks = c(0,1,2), 
+                     labels = c("sympatry","near\nsympatry","allopatry") ) +
+  scale_y_continuous(limits=c(-2,4),breaks=seq(-2,4,by=1)) +
+  coord_cartesian(xlim = c(-0.25, 2.25)) +
+  ylab ("Z-scaled rostrum width") + 
+  geom_hline(yintercept=0, linetype="dashed",linewidth=1.5) +
+  guides(color = guide_legend(title = "Sex")) +
+  theme_minimal() + 
+  theme(  panel.grid.minor = element_line(size=0.5),
+          plot.title = element_text(hjust = 0.5),
+          panel.border = element_rect(color = "grey", fill = NA),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size=12,hjust=0.5),
+          legend.text = element_text(size=12),
+          title = element_text(size=15),
+          axis.text.x = element_text(size=13),
+          axis.text.y = element_text(size=13),
+          strip.background = element_rect(fill = "lightgrey", linetype = "solid"),
+          strip.text = element_text(size=14,face="italic") ) + 
+  facet_wrap(~Species) 
 
 ## Interpretable measure means ====
 morphosumm<-rats4%>%group_by(Species,dist,Sex)%>%summarize(meanwgt=mean(Weight..gram./10,na.rm=T),
@@ -233,13 +750,3 @@ newdat <- newdat%>%pivot_longer(cols=c(5:8),names_to='Ectoparasite',values_to="p
 ggplot(newdat, aes(x = dist, y = probability, colour = Ectoparasite)) +
   geom_line() + facet_grid(macrotis ~ male, labeller="label_both")
 
-
-
-
-
-
-
-
-
-
-  
