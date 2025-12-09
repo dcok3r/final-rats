@@ -6,8 +6,6 @@ library(cmdstanr)
 library(bayesplot)
 library(factoextra)
 
-#library(tidybayes)
-
 options(mc.cores = parallel::detectCores())
 
 ## Load data
@@ -85,7 +83,23 @@ fit_PC <- stanmodel$sample(
   iter_warmup = 2000, iter_sampling = 4000
 )
 
+loo(fit_PC$draws("log_lik", format="matrix"))
+
 PCsummary<-fit_PC$summary(); PCsummary
+
+# ANOVA ---
+aov_PC_fus<-rats3%>%filter(Species=="fuscipes" & !is.na(Comp.1))%>%
+  mutate(dist=factor(dist,levels=c("0","1","2")),sex=factor(Sex))
+summary(aov(Comp.1 ~ dist*sex, data=aov_PC_fus))
+TukeyHSD(aov(Comp.1 ~ dist*sex, data=aov_PC_fus))
+
+    ###
+aov_PC_mac<-rats3%>%filter(Species=="macrotis" & !is.na(Comp.1))%>%
+  mutate(dist=factor(dist, levels=c("0","1","2")),sex=factor(Sex))
+summary(aov(Comp.1 ~ dist*sex, data=aov_PC_mac))
+TukeyHSD(aov(Comp.1 ~ dist*sex, data=aov_PC_mac))
+
+# ---
 
 PCsummary2<-as.data.frame(PCsummary)
 PCsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
@@ -93,6 +107,21 @@ PCsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
 
 draws_PC<-fit_PC$draws(format="df") # "lp","alpha.fus","alpha.mac","male","dist",
                                     # "mac_dist","mac_male","male_dist", "sigma"
+
+# slope credible interval ---
+draws_PC %>% reframe(fus_male_slope = `beta[2]` + `beta[5]` ,
+         fus_fem_slope = `beta[2]`,
+         mac_male_slope = `beta[2]` + `beta[3]` + `beta[5]`,
+         mac_fem_slope = `beta[2]`+ `beta[3]`) %>% 
+  summarize(fus_male=mean(fus_male_slope),fus_male_upr=quantile(fus_male_slope,probs=0.975), 
+            fus_male_lwr=quantile(fus_male_slope,probs=0.025), ##
+                        fus_fem=mean(fus_fem_slope),fus_fem_upr=quantile(fus_fem_slope,probs=0.975),
+            fus_fem_lwr=quantile(fus_fem_slope,probs=0.025), ##
+                        mac_male=mean(mac_male_slope), mac_male_upr=quantile(mac_male_slope,probs=0.975), 
+            mac_male_lwr=quantile(mac_male_slope,probs=0.025), ##
+                        mac_fem=mean(mac_fem_slope), mac_fem_upr=quantile(mac_fem_slope,probs=0.975), 
+            mac_fem_lwr=quantile(mac_fem_slope,probs=0.025)) %>% as.data.frame()
+# ---
 
 mcmc_trace(draws_PC, pars = c("alpha[1]","alpha[2]","beta[1]","beta[2]",
                               "beta[3]","beta[4]","beta[5]","sigma"))
@@ -252,11 +281,39 @@ fit_Zwgt <- stanmodel$sample(
 
 Zwgtsummary<-fit_Zwgt$summary(); Zwgtsummary
 
+# ANOVA ---
+aov_Zwgt_fus<-rats4%>%filter(Species=="fuscipes" & !is.na(z_weight))%>%
+  mutate(dist=factor(dist,levels=c("0","1","2")),sex=factor(Sex))
+summary(aov(z_weight ~ dist*sex, data=aov_Zwgt_fus))
+TukeyHSD(aov(z_weight ~ dist*sex, data=aov_Zwgt_fus))
+
+###
+aov_Zwgt_mac<-rats4%>%filter(Species=="macrotis" & !is.na(z_weight))%>%
+  mutate(dist=factor(dist, levels=c("0","1","2")),sex=factor(Sex))
+summary(aov(z_weight ~ dist*sex, data=aov_Zwgt_mac))
+TukeyHSD(aov(z_weight ~ dist*sex, data=aov_Zwgt_mac))
+# ---
+
 Zwgtsummary2<-as.data.frame(Zwgtsummary)
 Zwgtsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
                        "mac_dist","mac_male","male_dist", "sigma")
 
 draws_Zwgt<-fit_Zwgt$draws(format="df")
+
+# slope credible interval ---
+draws_Zwgt %>% reframe(fus_male_slope = `beta[2]` + `beta[5]` ,
+                     fus_fem_slope = `beta[2]`,
+                     mac_male_slope = `beta[2]` + `beta[3]` + `beta[5]`,
+                     mac_fem_slope = `beta[2]`+ `beta[3]`) %>% 
+  summarize(fus_male=mean(fus_male_slope),fus_male_upr=quantile(fus_male_slope,probs=0.975), 
+            fus_male_lwr=quantile(fus_male_slope,probs=0.025), ##
+            fus_fem=mean(fus_fem_slope),fus_fem_upr=quantile(fus_fem_slope,probs=0.975),
+            fus_fem_lwr=quantile(fus_fem_slope,probs=0.025), ##
+            mac_male=mean(mac_male_slope), mac_male_upr=quantile(mac_male_slope,probs=0.975), 
+            mac_male_lwr=quantile(mac_male_slope,probs=0.025), ##
+            mac_fem=mean(mac_fem_slope), mac_fem_upr=quantile(mac_fem_slope,probs=0.975), 
+            mac_fem_lwr=quantile(mac_fem_slope,probs=0.025)) %>% as.data.frame()
+# ---
 
 draws_Zwgt2<-draws_Zwgt[1:3000,] #subset draws
 
@@ -365,11 +422,38 @@ fit_Zear <- stanmodel$sample(
 
 Zearsummary<-fit_Zear$summary(); Zearsummary
 
+# ANOVA ---
+aov_Zear_fus<-rats4%>%filter(Species=="fuscipes" & !is.na(z_ear))%>%
+  mutate(dist=factor(dist,levels=c("0","1","2")),sex=factor(Sex))
+summary(aov(z_ear ~ dist*Sex, data=aov_Zear_fus))
+TukeyHSD(aov(z_ear ~ dist*sex, data=aov_Zear_fus))
+###
+aov_Zear_mac<-rats4%>%filter(Species=="macrotis" & !is.na(z_ear))%>%
+  mutate(dist=factor(dist, levels=c("0","1","2")),sex=factor(Sex))
+summary(aov(z_ear ~ dist*sex, data=aov_Zear_mac))
+TukeyHSD(aov(z_ear ~ dist*sex, data=aov_Zear_mac))
+# ---
+
 Zearsummary2<-as.data.frame(Zearsummary)
 Zearsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
                          "mac_dist","mac_male","male_dist", "sigma")
 
 draws_Zear<-fit_Zear$draws(format="df")
+
+# slope credible interval ---
+draws_Zear %>% reframe(fus_male_slope = `beta[2]` + `beta[5]` ,
+                       fus_fem_slope = `beta[2]`,
+                       mac_male_slope = `beta[2]` + `beta[3]` + `beta[5]`,
+                       mac_fem_slope = `beta[2]`+ `beta[3]`) %>% 
+  summarize(fus_male=mean(fus_male_slope),fus_male_upr=quantile(fus_male_slope,probs=0.975), 
+            fus_male_lwr=quantile(fus_male_slope,probs=0.025), ##
+            fus_fem=mean(fus_fem_slope),fus_fem_upr=quantile(fus_fem_slope,probs=0.975),
+            fus_fem_lwr=quantile(fus_fem_slope,probs=0.025), ##
+            mac_male=mean(mac_male_slope), mac_male_upr=quantile(mac_male_slope,probs=0.975), 
+            mac_male_lwr=quantile(mac_male_slope,probs=0.025), ##
+            mac_fem=mean(mac_fem_slope), mac_fem_upr=quantile(mac_fem_slope,probs=0.975), 
+            mac_fem_lwr=quantile(mac_fem_slope,probs=0.025)) %>% as.data.frame()
+# ---
 
 draws_Zear2<-draws_Zear[1:3000,] #subset draws
 
@@ -478,11 +562,38 @@ fit_Zfoot <- stanmodel$sample(
 
 Zfootsummary<-fit_Zfoot$summary(); Zfootsummary
 
+# ANOVA ---
+aov_Zfoot_fus<-rats4%>%filter(Species=="fuscipes" & !is.na(z_foot))%>%
+  mutate(dist=factor(dist,levels=c("0","1","2")),sex=factor(Sex))
+summary(aov(z_foot ~ dist*sex, data=aov_Zfoot_fus))
+TukeyHSD(aov(z_foot ~ dist*sex, data=aov_Zfoot_fus))
+###
+aov_Zfoot_mac<-rats4%>%filter(Species=="macrotis" & !is.na(z_foot))%>%
+  mutate(dist=factor(dist, levels=c("0","1","2")),sex=factor(Sex))
+summary(aov(z_foot ~ dist*sex, data=aov_Zfoot_mac))
+TukeyHSD(aov(z_foot ~ dist*sex, data=aov_Zfoot_mac))
+# ---
+
 Zfootsummary2<-as.data.frame(Zfootsummary)
 Zfootsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
                           "mac_dist","mac_male","male_dist", "sigma")
 
 draws_Zfoot<-fit_Zfoot$draws(format="df")
+
+# slope credible interval ---
+draws_Zfoot %>% reframe(fus_male_slope = `beta[2]` + `beta[5]` ,
+                       fus_fem_slope = `beta[2]`,
+                       mac_male_slope = `beta[2]` + `beta[3]` + `beta[5]`,
+                       mac_fem_slope = `beta[2]`+ `beta[3]`) %>% 
+  summarize(fus_male=mean(fus_male_slope),fus_male_upr=quantile(fus_male_slope,probs=0.975), 
+            fus_male_lwr=quantile(fus_male_slope,probs=0.025), ##
+            fus_fem=mean(fus_fem_slope),fus_fem_upr=quantile(fus_fem_slope,probs=0.975),
+            fus_fem_lwr=quantile(fus_fem_slope,probs=0.025), ##
+            mac_male=mean(mac_male_slope), mac_male_upr=quantile(mac_male_slope,probs=0.975), 
+            mac_male_lwr=quantile(mac_male_slope,probs=0.025), ##
+            mac_fem=mean(mac_fem_slope), mac_fem_upr=quantile(mac_fem_slope,probs=0.975), 
+            mac_fem_lwr=quantile(mac_fem_slope,probs=0.025)) %>% as.data.frame()
+# ---
 
 draws_Zfoot2<-draws_Zfoot[1:3000,] #subset draws
 
@@ -591,11 +702,38 @@ fit_Zrost <- stanmodel$sample(
 
 Zrostsummary<-fit_Zrost$summary(); Zrostsummary
 
+# ANOVA ---
+aov_Zrost_fus<-rats4%>%filter(Species=="fuscipes" & !is.na(z_rost))%>%
+  mutate(dist=factor(dist,levels=c("0","1","2")),sex=factor(Sex))
+summary(aov(z_rost ~ dist*sex, data=aov_Zrost_fus))
+TukeyHSD(aov(z_rost ~ dist*sex, data=aov_Zrost_fus))
+###
+aov_Zrost_mac<-rats4%>%filter(Species=="macrotis" & !is.na(z_rost))%>%
+  mutate(dist=factor(dist, levels=c("0","1","2")),sex=factor(Sex))
+summary(aov(z_rost ~ dist*sex, data=aov_Zrost_mac))
+TukeyHSD(aov(z_rost ~ dist*sex, data=aov_Zrost_mac))
+# ---
+
 Zrostsummary2<-as.data.frame(Zrostsummary)
 Zrostsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
                           "mac_dist","mac_male","male_dist", "sigma")
 
 draws_Zrost<-fit_Zrost$draws(format="df")
+
+# slope credible interval ---
+draws_Zrost %>% reframe(fus_male_slope = `beta[2]` + `beta[5]` ,
+                        fus_fem_slope = `beta[2]`,
+                        mac_male_slope = `beta[2]` + `beta[3]` + `beta[5]`,
+                        mac_fem_slope = `beta[2]`+ `beta[3]`) %>% 
+  summarize(fus_male=mean(fus_male_slope),fus_male_upr=quantile(fus_male_slope,probs=0.975), 
+            fus_male_lwr=quantile(fus_male_slope,probs=0.025), ##
+            fus_fem=mean(fus_fem_slope),fus_fem_upr=quantile(fus_fem_slope,probs=0.975),
+            fus_fem_lwr=quantile(fus_fem_slope,probs=0.025), ##
+            mac_male=mean(mac_male_slope), mac_male_upr=quantile(mac_male_slope,probs=0.975), 
+            mac_male_lwr=quantile(mac_male_slope,probs=0.025), ##
+            mac_fem=mean(mac_fem_slope), mac_fem_upr=quantile(mac_fem_slope,probs=0.975), 
+            mac_fem_lwr=quantile(mac_fem_slope,probs=0.025)) %>% as.data.frame()
+# ---
 
 draws_Zrost2<-draws_Zrost[1:3000,] #subset draws
 
@@ -735,18 +873,53 @@ rats4$Ectoparasite.Load<-factor(rats4$Ectoparasite.Load, levels=c("None","Low",
 
 exp(cbind(OR = coef(model), confint(model)))
   
+# Analysis of Frequency Data
 
-newdat <- data.frame(
-  male = rep(0:1, 300),
-  macrotis = rep(0:1, each = 300),
-  dist = rep(0:2,each=200),
-  Weight..gram. = rep(seq(from=min(rats4$Weight..gram.,na.rm=T), 
-                          to=max(rats4$Weight..gram.,na.rm=T), length.out = 100), 6))
-
-newdat <- cbind(newdat, predict(model, newdat, type = "probs"))
+ecto_df<-rats4%>%filter(!is.na(Ectoparasite.Load))%>%
+  mutate(Species=factor(Species),dist=factor(dist,levels=c("0","1","2")),
+         ectoparasite=factor(Ectoparasite.Load,levels=c("None","Low","Medium","High")))%>%
+          dplyr::group_by(Species,Ectoparasite.Load,dist,.drop=FALSE)%>%dplyr::summarize(count=n())
   
-newdat <- newdat%>%pivot_longer(cols=c(5:8),names_to='Ectoparasite',values_to="probability")
+ecto_df<-ecto_df%>%group_by(Species, .drop=FALSE)%>%dplyr::summarize(total=sum(count))  %>%
+          right_join(.,ecto_df)%>%mutate(diff=total-count)
 
-ggplot(newdat, aes(x = dist, y = probability, colour = Ectoparasite)) +
-  geom_line() + facet_grid(macrotis ~ male, labeller="label_both")
 
+matrix1<-with(rats4,matrix(table(Species,Ectoparasite.Load), ncol = 2,byrow=T))
+    matrix(ecto_df)
+    
+with(ecto_df%>%filter(dist==0 & Ectoparasite.Load=="None"),
+     fisher.test(x=count,y=Species))
+
+with(ecto_df%>%filter(dist==1),
+     pairwiseNominalIndependence(table(Species,Ectoparasite.Load),
+          fisher=FALSE, gtest=FALSE, chisq=TRUE, method="fdr") )
+
+
+
+with(ecto_df%>%filter(dist==1 & Ectoparasite.Load=="None"),
+     data.frame(Species,count,diff))
+
+with(ecto_df%>%filter(dist==1 & Ectoparasite.Load=="None"),
+     t(matrix(c(count,diff),nrow=2,
+            dimnames=list(c("fuscipes","macrotis"),c("count","total"))))
+     )
+
+matrix(c(diff,count),nrow=2,dimnames=list(c("fuscipes","macrotis"),c("count","total")))
+
+
+with(ecto_df%>%filter(dist==1 & Ectoparasite.Load=="None"),fisher.test(
+  t(matrix(c(Species,diff,count),nrow=2,
+           dimnames=list(c("fuscipes","macrotis"),c("count","total"))))
+  
+))
+
+with(ecto_df%>%filter(dist==1 & Ectoparasite.Load=="None"),as.table(rbind(count,diff)))
+
+
+
+
+
+
+
+
+  
