@@ -739,7 +739,7 @@ draws_Zrost2<-draws_Zrost[1:3000,] #subset draws
 
 # fuscipes
 ggplot(rats4%>%filter(Species=="fuscipes"),aes(x=dist,y=z_rost,color=factor(Sex))) + 
-  geom_quasirandom(width=0.3) +
+  geom_quasirandom(width=0.3) +w
   geom_abline(intercept=draws_Zrost2$`alpha[1]`, #fus female intercept
               slope=draws_Zrost2$`beta[2]`, # distance beta
               alpha=0.05,color="pink") +
@@ -848,19 +848,33 @@ ggplot(rats4,aes(x=factor(dist),y=Rostrum..mm.,fill=Sex)) + geom_boxplot() +
 ## Ectoparasites ====
 
   # visualize
-  parasite.summ<-rats4%>%filter(!is.na(Ectoparasite.Load))%>%
-    group_by(Species,Ectoparasite.Load,dist)%>%summarize(count=n())
-    
-  parasite.summ<-rats4%>%filter(!is.na(Ectoparasite.Load))%>%
-    group_by(Species,dist)%>%summarize(count=n())%>%
-    right_join(.,parasite.summ,by=c("Species","dist"))
-    
-  parasite.summ<-parasite.summ%>%mutate(prop=count.y/count.x)
-    
-ggplot(parasite.summ,aes(x=Ectoparasite.Load,y=prop,fill=factor(Species))) + 
-  geom_histogram(stat="identity",position="dodge") + facet_grid(~dist)
+  rats4$Ectoparasite.Load<-factor(rats4$Ectoparasite.Load,levels=c("None","Low","Medium","High"))
+  rats4$dist<-factor(rats4$dist,levels=c("0","1","2"))
 
+  parasite.summ<-rats4%>%filter(!is.na(Ectoparasite.Load))%>%
+    group_by(Species,Ectoparasite.Load,dist,.drop=FALSE)%>%dplyr::summarize(count=n())
+    
+  parasite.summ<-rats4%>%filter(!is.na(Ectoparasite.Load))%>%
+    group_by(Species,dist,.drop=FALSE)%>%dplyr::summarize(count=n())%>%
+    right_join(.,parasite.summ,by=c("Species","dist"))%>%mutate(prop=count.y/count.x)
   
+ggplot(parasite.summ,aes(x=dist,y=prop,fill=factor(Species))) + 
+  geom_histogram(stat="identity",position="dodge") + facet_grid(~Ectoparasite.Load) +
+  scale_fill_manual(values=c("darkorange1","steelblue2"))+
+  scale_x_discrete(labels = c("sympatry","near\nsympatry","allopatry") ) +
+  ylab ("Proportion") + ggtitle("Ectoparasite Load") +
+  guides(fill = guide_legend(title = "Species")) +
+  theme_minimal() + 
+  theme(  plot.title = element_text(size=16,hjust = 0.5),
+          panel.border = element_rect(color = "grey", fill = NA),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size=12,hjust=0.5),
+          legend.text = element_text(size=12),
+          title = element_text(size=15),
+          axis.text.x = element_text(size=13),
+          axis.text.y = element_text(size=13),
+          strip.background = element_rect(fill = "lightgrey", linetype = "solid"),
+          strip.text = element_text(size=14) )
 
 library(MASS)
 rats4$Ectoparasite.Load<-factor(rats4$Ectoparasite.Load, levels=c("None","Low",
@@ -873,51 +887,236 @@ rats4$Ectoparasite.Load<-factor(rats4$Ectoparasite.Load, levels=c("None","Low",
 
 exp(cbind(OR = coef(model), confint(model)))
   
-# Analysis of Frequency Data
+
+## Comparison of counts ---
 
 ecto_df<-rats4%>%filter(!is.na(Ectoparasite.Load))%>%
   mutate(Species=factor(Species),dist=factor(dist,levels=c("0","1","2")),
          ectoparasite=factor(Ectoparasite.Load,levels=c("None","Low","Medium","High")))%>%
           dplyr::group_by(Species,Ectoparasite.Load,dist,.drop=FALSE)%>%dplyr::summarize(count=n())
   
-ecto_df<-ecto_df%>%group_by(Species, .drop=FALSE)%>%dplyr::summarize(total=sum(count))  %>%
+ecto_df<-ecto_df%>%group_by(Species,dist, .drop=FALSE)%>%dplyr::summarize(total=sum(count))  %>%
           right_join(.,ecto_df)%>%mutate(diff=total-count)
 
+## DISTANCE 0
+ # "NONE"
+with(ecto_df %>% filter(dist==0 & Ectoparasite.Load=="None"), 
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
-matrix1<-with(rats4,matrix(table(Species,Ectoparasite.Load), ncol = 2,byrow=T))
-    matrix(ecto_df)
-    
-with(ecto_df%>%filter(dist==0 & Ectoparasite.Load=="None"),
-     fisher.test(x=count,y=Species))
+ # "LOW"
+with(ecto_df %>% filter(dist==0 & Ectoparasite.Load=="Low"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## **
 
-with(ecto_df%>%filter(dist==1),
-     pairwiseNominalIndependence(table(Species,Ectoparasite.Load),
-          fisher=FALSE, gtest=FALSE, chisq=TRUE, method="fdr") )
+ # "MEDIUM"
+with(ecto_df %>% filter(dist==0 & Ectoparasite.Load=="Medium"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## **
 
+ # "HIGH"
+with(ecto_df %>% filter(dist==0 & Ectoparasite.Load=="High"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
+## DISTANCE 1
+  # "NONE"
+with(ecto_df %>% filter(dist==1 & Ectoparasite.Load=="None"), 
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
-with(ecto_df%>%filter(dist==1 & Ectoparasite.Load=="None"),
-     data.frame(Species,count,diff))
+ # "LOW"
+with(ecto_df %>% filter(dist==1 & Ectoparasite.Load=="Low"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ****
 
-with(ecto_df%>%filter(dist==1 & Ectoparasite.Load=="None"),
-     t(matrix(c(count,diff),nrow=2,
-            dimnames=list(c("fuscipes","macrotis"),c("count","total"))))
-     )
+ # "MEDIUM"
+with(ecto_df %>% filter(dist==1 & Ectoparasite.Load=="Medium"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## **
 
-matrix(c(diff,count),nrow=2,dimnames=list(c("fuscipes","macrotis"),c("count","total")))
-
-
-with(ecto_df%>%filter(dist==1 & Ectoparasite.Load=="None"),fisher.test(
-  t(matrix(c(Species,diff,count),nrow=2,
-           dimnames=list(c("fuscipes","macrotis"),c("count","total"))))
-  
-))
-
-with(ecto_df%>%filter(dist==1 & Ectoparasite.Load=="None"),as.table(rbind(count,diff)))
+ # "HIGH"
+with(ecto_df %>% filter(dist==1 & Ectoparasite.Load=="High"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## **
 
 
+## DISTANCE 2
+
+   # "NONE"
+with(ecto_df %>% filter(dist==2 & Ectoparasite.Load=="None"), 
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+ # "LOW"
+with(ecto_df %>% filter(dist==2 & Ectoparasite.Load=="Low"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+ # "MEDIUM"
+with(ecto_df %>% filter(dist==2 & Ectoparasite.Load=="Medium"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+ # "HIGH"
+with(ecto_df %>% filter(dist==2 & Ectoparasite.Load=="High"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 
+## Sex-species
+parasite.summ_sex<-rats4%>%filter(!is.na(Ectoparasite.Load))%>%
+  group_by(Species,Ectoparasite.Load,dist,Sex,.drop=FALSE)%>%dplyr::summarize(count=n())
+
+parasite.summ_sex<-rats4%>%filter(!is.na(Ectoparasite.Load))%>%
+  group_by(Species,dist,Sex,.drop=FALSE)%>%dplyr::summarize(count=n())%>%
+  right_join(.,parasite.summ_sex,by=c("Species","dist","Sex"))%>%mutate(prop=count.y/count.x)
+
+
+ggplot(parasite.summ_sex%>%filter(Species=="fuscipes"),aes(x=dist,y=prop,fill=factor(Sex))) + 
+  geom_histogram(stat="identity",position="dodge") + facet_grid(~Ectoparasite.Load) +
+  scale_fill_manual(values=c("red","blue"))+
+  scale_x_discrete(labels = c("sympatry","near\nsympatry","allopatry") ) +
+  ylab ("Proportion") + ggtitle("Ectoparasite Load - N.fuscipes") +
+  guides(fill = guide_legend(title = "Sex")) +
+  theme_minimal() + 
+  theme(  plot.title = element_text(size=16,hjust = 0.5),
+          panel.border = element_rect(color = "grey", fill = NA),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size=12,hjust=0.5),
+          legend.text = element_text(size=12),
+          title = element_text(size=15),
+          axis.text.x = element_text(size=13),
+          axis.text.y = element_text(size=13),
+          strip.background = element_rect(fill = "lightgrey", linetype = "solid"),
+          strip.text = element_text(size=14) )
+
+ggplot(parasite.summ_sex%>%filter(Species=="macrotis"),aes(x=dist,y=prop,fill=factor(Sex))) + 
+  geom_histogram(stat="identity",position="dodge") + facet_grid(~Ectoparasite.Load) +
+  scale_fill_manual(values=c("red","blue"))+
+  scale_x_discrete(labels = c("sympatry","near\nsympatry","allopatry") ) +
+  ylab ("Proportion") + ggtitle("Ectoparasite Load - N.macrotis") +
+  guides(fill = guide_legend(title = "Sex")) +
+  theme_minimal() + 
+  theme(  plot.title = element_text(size=16,hjust = 0.5),
+          panel.border = element_rect(color = "grey", fill = NA),
+          axis.title.x = element_blank(),
+          legend.title = element_text(size=12,hjust=0.5),
+          legend.text = element_text(size=12),
+          title = element_text(size=15),
+          axis.text.x = element_text(size=13),
+          axis.text.y = element_text(size=13),
+          strip.background = element_rect(fill = "lightgrey", linetype = "solid"),
+          strip.text = element_text(size=14) )
+
+
+## DF
+ecto_df_sex<-rats4%>%filter(!is.na(Ectoparasite.Load))%>%
+  mutate(Species=factor(Species),dist=factor(dist,levels=c("0","1","2")), Sex=factor(Sex),
+         ectoparasite=factor(Ectoparasite.Load,levels=c("None","Low","Medium","High")))%>%
+  dplyr::group_by(Species,Ectoparasite.Load,Sex,dist,.drop=FALSE)%>%dplyr::summarize(count=n())
+
+ecto_df_sex<-ecto_df_sex%>%group_by(Species,dist,Sex,.drop=FALSE)%>%dplyr::summarize(total=sum(count))%>%
+  right_join(.,ecto_df_sex)%>%mutate(diff=total-count)
+
+
+## fuscipes
+
+## DISTANCE 0
+# "NONE"
+with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==0 & Ectoparasite.Load=="None"), 
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "LOW"
+with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==0 & Ectoparasite.Load=="Low"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "MEDIUM"
+with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==0 & Ectoparasite.Load=="Medium"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "HIGH"
+with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==0 & Ectoparasite.Load=="High"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+## DISTANCE 1
+# "NONE"
+with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==1 & Ectoparasite.Load=="None"), 
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "LOW"
+with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==1 & Ectoparasite.Load=="Low"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "MEDIUM"
+with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==1 & Ectoparasite.Load=="Medium"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "HIGH"
+with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==1 & Ectoparasite.Load=="High"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+
+## DISTANCE 2
+
+# "NONE"
+with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==2 & Ectoparasite.Load=="None"), 
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "LOW"
+with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==2 & Ectoparasite.Load=="Low"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "MEDIUM"
+with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==2 & Ectoparasite.Load=="Medium"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "HIGH"
+with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==2 & Ectoparasite.Load=="High"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+## macrotis
+
+## DISTANCE 0
+# "NONE"
+with(ecto_df_sex %>% filter(Species=="macrotis" & dist==0 & Ectoparasite.Load=="None"), 
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "LOW"
+with(ecto_df_sex %>% filter(Species=="macrotis" & dist==0 & Ectoparasite.Load=="Low"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "MEDIUM"
+with(ecto_df_sex %>% filter(Species=="macrotis" & dist==0 & Ectoparasite.Load=="Medium"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "HIGH"
+with(ecto_df_sex %>% filter(Species=="macrotis" & dist==0 & Ectoparasite.Load=="High"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+## DISTANCE 1
+# "NONE"
+with(ecto_df_sex %>% filter(Species=="macrotis" & dist==1 & Ectoparasite.Load=="None"), 
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "LOW"
+with(ecto_df_sex %>% filter(Species=="macrotis" & dist==1 & Ectoparasite.Load=="Low"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "MEDIUM"
+with(ecto_df_sex %>% filter(Species=="macrotis" & dist==1 & Ectoparasite.Load=="Medium"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "HIGH"
+with(ecto_df_sex %>% filter(Species=="macrotis" & dist==1 & Ectoparasite.Load=="High"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+
+## DISTANCE 2
+
+# "NONE"
+with(ecto_df_sex %>% filter(Species=="macrotis" & dist==2 & Ectoparasite.Load=="None"), 
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "LOW"
+with(ecto_df_sex %>% filter(Species=="macrotis" & dist==2 & Ectoparasite.Load=="Low"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "MEDIUM"
+with(ecto_df_sex %>% filter(Species=="macrotis" & dist==2 & Ectoparasite.Load=="Medium"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
+# "HIGH"
+with(ecto_df_sex %>% filter(Species=="macrotis" & dist==2 & Ectoparasite.Load=="High"),
+     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 
 
