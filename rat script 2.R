@@ -1,15 +1,14 @@
-
 library(tidyverse)
+library(factoextra)
 library(ggplot2)
 library(ggbeeswarm)
 library(cmdstanr)
 library(bayesplot)
-library(factoextra)
-
-options(mc.cores = parallel::detectCores())
+library(MASS)
+library(rstatix)
 
 ## Load data
-df<-read.csv("~/NRES 746/746 Project/2015_05_06_ExternalMorphology_Middens_Distance_Adults_3species.csv",
+df<-read.csv("~/2015_05_06_ExternalMorphology_Middens_Distance_Adults_3species.csv",
              header=TRUE,na.strings=c("",NA))
 df<-df%>%filter(Species!='hybrid')
 df$Sex<-factor(df$Sex,levels=c("Female","Male"))
@@ -32,39 +31,49 @@ df$macrotis<-as.integer(df$Species)-1
 ## PCA ====
 #see if pregnant females should be excluded
 df$Pregnant<-ifelse(df$Sex=="Female" & is.na(df$Pregnant),"no",df$Pregnant)
-with(df%>%filter(Sex=="Female"),t.test(Weight..gram.~factor(Pregnant))) #no difference in weight
+with(df%>%filter(Sex=="Female" & Species=="fuscipes"),
+     t.test(Weight..gram.~factor(Pregnant))) #no difference in weight
+with(df%>%filter(Sex=="Female" & Species=="macrotis"),
+     t.test(Weight..gram.~factor(Pregnant))) #no difference in weight
 #-- -- --
 
-rats<-df%>%mutate(across(c(5,8:10),scale))
-
-rats2<-rats%>%subset(select=c("ID","Weight..gram.","Ear..mm.","Rostrum..mm.","Hind.Foot..mm."))
+rats2<-df%>%subset(select=c("ID","Weight..gram.","Ear..mm.","Rostrum..mm.","Hind.Foot..mm."))
 
 cov(subset(rats2,select=-1), use = "complete.obs")
 cor(subset(rats2,select=-1), use = "complete.obs")
 
 rats2<-na.omit(rats2)
 
-PC<-princomp(subset(rats2,select=-1),cor=T)
+PC<-prcomp(subset(rats2,select=-1),center=T,scale=T) #
 summary(PC)
+
+PC$rotation #loadings
+PC$sdev^2 #eigenvalues
 
 fviz_eig(PC,addlabels=T)
 fviz_pca_var(PC, col.var="cos2",gradient.cols=c("blue","orange","green"),repel=TRUE)
 
-rats2<-cbind(rats2,PC$scores)
+rats2<-cbind(rats2,(-PC$x)) # reflect PCs over x=0
 
-rats3<-rats%>%left_join(rats2)
+rats3<-df%>%left_join(rats2)
+
+# are male fuscipes statistically larger than macrotis?
+with(rats3%>%filter(dist==0 & Sex=="Male"), t.test(PC1~factor(Species)))
+
+# are male fuscipes statistically heavier than macrotis?
+with(rats3%>%filter(dist==0 & Sex=="Male"), t.test(Weight..gram.~factor(Species)))
 
 ## Morphology (PC) model ====
 
 # look at some possible interactions- do these make sense to include?
-ggplot(rats3,aes(x=male,y=Comp.1,color=factor(macrotis))) + geom_jitter() + 
+ggplot(rats3,aes(x=male,y=PC1,color=factor(macrotis))) + geom_jitter() + 
   geom_smooth(method="lm")
-ggplot(rats3,aes(x=dist,y=Comp.1,color=factor(macrotis))) + geom_jitter() + 
+ggplot(rats3,aes(x=dist,y=PC1,color=factor(macrotis))) + geom_jitter() + 
   geom_smooth(method="lm")
-ggplot(rats3,aes(x=dist,y=Comp.1,color=factor(male))) + geom_jitter() + geom_smooth(method="lm")
+ggplot(rats3,aes(x=dist,y=PC1,color=factor(male))) + geom_jitter() + geom_smooth(method="lm")
 
 ## create model matrix for PC model
-PCdf<-rats3%>%reframe(Comp.1,species=as.integer(Species),macrotis,male,dist,
+PCdf<-rats3%>%reframe(PC1,species=as.integer(Species),macrotis,male,dist,
               macrotis_distance=macrotis*dist, macrotis_male=macrotis*male,
               male_distance=male*dist)
 
@@ -73,7 +82,7 @@ PCdf$macrotis<-NULL
 
 #list of stan inputs
 PC_df <- list(
-  N = nrow(PCdf), K = 5, X = PCdf[,c(3:7)], y = PCdf$Comp.1, n_sp = nlevels(factor(PCdf$species)),
+  N = nrow(PCdf), K = 5, X = PCdf[,c(3:7)], y = PCdf$PC1, n_sp = nlevels(factor(PCdf$species)),
   species = PCdf$species  )
 
 stanmodel<-cmdstan_model("rats_stan.stan")
@@ -88,21 +97,21 @@ loo(fit_PC$draws("log_lik", format="matrix"))
 PCsummary<-fit_PC$summary(); PCsummary
 
 # ANOVA ---
-aov_PC_fus<-rats3%>%filter(Species=="fuscipes" & !is.na(Comp.1))%>%
+aov_PC_fus<-rats3%>%filter(Species=="fuscipes" & !is.na(PC1))%>%
   mutate(dist=factor(dist,levels=c("0","1","2")),sex=factor(Sex))
-summary(aov(Comp.1 ~ dist*sex, data=aov_PC_fus))
-TukeyHSD(aov(Comp.1 ~ dist*sex, data=aov_PC_fus))
+summary(aov(PC1 ~ dist*sex, data=aov_PC_fus))
+TukeyHSD(aov(PC1 ~ dist*sex, data=aov_PC_fus))
 
     ###
-aov_PC_mac<-rats3%>%filter(Species=="macrotis" & !is.na(Comp.1))%>%
+aov_PC_mac<-rats3%>%filter(Species=="macrotis" & !is.na(PC1))%>%
   mutate(dist=factor(dist, levels=c("0","1","2")),sex=factor(Sex))
-summary(aov(Comp.1 ~ dist*sex, data=aov_PC_mac))
-TukeyHSD(aov(Comp.1 ~ dist*sex, data=aov_PC_mac))
+summary(aov(PC1 ~ dist*sex, data=aov_PC_mac))
+TukeyHSD(aov(PC1 ~ dist*sex, data=aov_PC_mac))
 
 # ---
 
 PCsummary2<-as.data.frame(PCsummary)
-PCsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
+PCsummary2$variable[c(1:9)]<-c("lp","alpha.fus","alpha.mac","male","dist",
                        "mac_dist","mac_male","male_dist", "sigma")
 
 draws_PC<-fit_PC$draws(format="df") # "lp","alpha.fus","alpha.mac","male","dist",
@@ -130,7 +139,7 @@ mcmc_trace(draws_PC, pars = c("alpha[1]","alpha[2]","beta[1]","beta[2]",
 draws_PC2<-draws_PC[1:3000,] #subset draws for shorter plotting times
 
 # Warning: plots take a bit of time to run and appear (< ~1min)
-ggplot(rats3%>%filter(Species=="fuscipes"),aes(x=dist,y=Comp.1,color=factor(Sex))) + 
+ggplot(rats3%>%filter(Species=="fuscipes"),aes(x=dist,y=PC1,color=factor(Sex))) + 
   geom_quasirandom(width=0.2) +
   geom_abline(intercept=draws_PC2$`alpha[1]`, #fus female intercept
                slope=draws_PC2$`beta[2]`, # distance beta
@@ -154,7 +163,7 @@ ggplot(rats3%>%filter(Species=="fuscipes"),aes(x=dist,y=Comp.1,color=factor(Sex)
   ylab ("Principal component 1") + 
   guides(color = guide_legend(title = "Sex")) +
   theme_minimal() + 
-  theme(  panel.grid.minor = element_line(size=0.5),
+  theme(  panel.grid.minor = element_line(linewidth=0.5),
           plot.title = element_text(hjust = 0.5),
           panel.border = element_rect(color = "grey", fill = NA),
           axis.title.x = element_blank(),
@@ -170,7 +179,7 @@ ggplot(rats3%>%filter(Species=="fuscipes"),aes(x=dist,y=Comp.1,color=factor(Sex)
 
 # --- MACROTIS PC PLOT ----
 
-ggplot(rats3%>%filter(Species=="macrotis"),aes(x=dist,y=Comp.1,color=factor(Sex))) + 
+ggplot(rats3%>%filter(Species=="macrotis"),aes(x=dist,y=PC1,color=factor(Sex))) + 
   geom_quasirandom(width=0.3) +
   geom_abline (intercept=draws_PC2$`alpha[2]`, #mac female intercept
                 slope=draws_PC2$`beta[2]`+
@@ -216,7 +225,7 @@ ggplot(rats3%>%filter(Species=="macrotis"),aes(x=dist,y=Comp.1,color=factor(Sex)
   
 
 # look at the difference between bayesian and frequentist estimates
-ggplot(rats3%>%filter(Species=="fuscipes"),aes(x=dist,y=Comp.1,color=factor(Sex))) + 
+ggplot(rats3%>%filter(Species=="fuscipes"),aes(x=dist,y=PC1,color=factor(Sex))) + 
   geom_quasirandom(width=0.2) +
   geom_abline(intercept=PCsummary2$mean[PCsummary2$variable=="alpha.fus"], #fem fus meanline
               slope=PCsummary2$mean[PCsummary2$variable=="dist"],
@@ -229,7 +238,7 @@ ggplot(rats3%>%filter(Species=="fuscipes"),aes(x=dist,y=Comp.1,color=factor(Sex)
         geom_smooth(method='lm')
 
 
-ggplot(rats3%>%filter(Species=="macrotis"),aes(x=dist,y=Comp.1,color=factor(Sex))) + 
+ggplot(rats3%>%filter(Species=="macrotis"),aes(x=dist,y=PC1,color=factor(Sex))) + 
   geom_quasirandom(width=0.3) +
   geom_abline(intercept=PCsummary2$mean[PCsummary2$variable=="alpha.mac"], #fem mac meanline
               slope=PCsummary2$mean[PCsummary2$variable=="dist"]+
@@ -295,10 +304,13 @@ TukeyHSD(aov(z_weight ~ dist*sex, data=aov_Zwgt_mac))
 # ---
 
 Zwgtsummary2<-as.data.frame(Zwgtsummary)
-Zwgtsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
+Zwgtsummary2$variable[c(1:9)]<-c("lp","alpha.fus","alpha.mac","male","dist",
                        "mac_dist","mac_male","male_dist", "sigma")
 
 draws_Zwgt<-fit_Zwgt$draws(format="df")
+
+mcmc_trace(draws_Zwgt, pars = c("alpha[1]","alpha[2]","beta[1]","beta[2]",
+                              "beta[3]","beta[4]","beta[5]","sigma"))
 
 # slope credible interval ---
 draws_Zwgt %>% reframe(fus_male_slope = `beta[2]` + `beta[5]` ,
@@ -440,6 +452,9 @@ Zearsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
 
 draws_Zear<-fit_Zear$draws(format="df")
 
+mcmc_trace(draws_Zear, pars = c("alpha[1]","alpha[2]","beta[1]","beta[2]",
+                                "beta[3]","beta[4]","beta[5]","sigma"))
+
 # slope credible interval ---
 draws_Zear %>% reframe(fus_male_slope = `beta[2]` + `beta[5]` ,
                        fus_fem_slope = `beta[2]`,
@@ -565,7 +580,7 @@ Zfootsummary<-fit_Zfoot$summary(); Zfootsummary
 # ANOVA ---
 aov_Zfoot_fus<-rats4%>%filter(Species=="fuscipes" & !is.na(z_foot))%>%
   mutate(dist=factor(dist,levels=c("0","1","2")),sex=factor(Sex))
-summary(aov(z_foot ~ dist*sex, data=aov_Zfoot_fus))
+summary(aov(z_foot ~ dist+sex, data=aov_Zfoot_fus))
 TukeyHSD(aov(z_foot ~ dist*sex, data=aov_Zfoot_fus))
 ###
 aov_Zfoot_mac<-rats4%>%filter(Species=="macrotis" & !is.na(z_foot))%>%
@@ -579,6 +594,9 @@ Zfootsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
                           "mac_dist","mac_male","male_dist", "sigma")
 
 draws_Zfoot<-fit_Zfoot$draws(format="df")
+
+mcmc_trace(draws_Zfoot, pars = c("alpha[1]","alpha[2]","beta[1]","beta[2]",
+                                 "beta[3]","beta[4]","beta[5]","sigma"))
 
 # slope credible interval ---
 draws_Zfoot %>% reframe(fus_male_slope = `beta[2]` + `beta[5]` ,
@@ -720,6 +738,9 @@ Zrostsummary2$variable<-c("lp","alpha.fus","alpha.mac","male","dist",
 
 draws_Zrost<-fit_Zrost$draws(format="df")
 
+mcmc_trace(draws_Zrost, pars = c("alpha[1]","alpha[2]","beta[1]","beta[2]",
+                                "beta[3]","beta[4]","beta[5]","sigma"))
+
 # slope credible interval ---
 draws_Zrost %>% reframe(fus_male_slope = `beta[2]` + `beta[5]` ,
                         fus_fem_slope = `beta[2]`,
@@ -821,7 +842,7 @@ ggplot(rats4%>%filter(Species=="macrotis"),aes(x=dist,y=z_rost,color=factor(Sex)
           strip.text = element_text(size=14,face="italic") ) + 
   facet_wrap(~Species) 
 
-## Interpretable measure means ====
+## Morpho measure means ====
 morphosumm<-rats4%>%group_by(Species,dist,Sex)%>%summarize(meanwgt=mean(Weight..gram./10,na.rm=T),
           wgt.sd=sd(Weight..gram.,na.rm=T), meanear=mean(Ear..mm.,na.rm=T),
           ear.sd=sd(Ear..mm.,na.rm=T), meanfoot=mean(Hind.Foot..mm.,na.rm=T), 
@@ -876,16 +897,65 @@ ggplot(parasite.summ,aes(x=dist,y=prop,fill=factor(Species))) +
           strip.background = element_rect(fill = "lightgrey", linetype = "solid"),
           strip.text = element_text(size=14) )
 
-library(MASS)
 rats4$Ectoparasite.Load<-factor(rats4$Ectoparasite.Load, levels=c("None","Low",
                                       "Medium","High"),ordered=T)
+rats4$dist<-as.integer(rats4$dist)
 
-  model<-polr(Ectoparasite.Load ~ macrotis + male + dist + Weight..gram. +
+  df2<-rats4%>%filter(!is.na(Ectoparasite.Load))%>%
+    group_by(Species,Ectoparasite.Load,.drop=F)%>%reframe(Species=as.integer(Species),
+                Ectoparasite.Load=as.integer(Ectoparasite.Load),count=n())%>%distinct()
+  rats4$wgt_s<-scale(rats4$Weight..gram.)[,1]
+  
+  model<-polr(Ectoparasite.Load ~ macrotis + male + dist + wgt_s +
                 macrotis:male + macrotis:dist + male:dist, data=rats4, Hess=T)
-  summary(model)
+  parasite.summary<-summary(model)
   confint(model)
-
+  # odds ratios
 exp(cbind(OR = coef(model), confint(model)))
+
+# p values
+pnorm(abs(parasite.summary$coefficients[,"t value"]),lower.tail=F,0,1)*2
+
+
+#calculate percentages
+modcoefs<-coef(model)
+    # get feasible weights for each species and sex (mean, min, max) for  probability calculations
+sp.wgts<-rats4%>%filter(dist==2)%>%group_by(Species,Sex)%>%reframe(Species=as.integer(Species)-1,
+          Sex=as.integer(Sex)-1, meanwgt=mean(wgt_s,na.rm=T), minwgt=min(wgt_s,na.rm=T),
+          maxwgt=max(wgt_s,na.rm=T)) %>% distinct()
+
+macrotis<- 0
+male<- 0
+dist<- c(0,1,2)
+wgt<- sp.wgts$meanwgt[sp.wgts$Species == macrotis & sp.wgts$Sex == male]
+
+#NONE
+plogis(-5.6329-(modcoefs["macrotis"]*macrotis + modcoefs["male"]*male + modcoefs["dist"]*dist +
+           modcoefs["wgt_s"]*wgt + modcoefs["macrotis:male"]*macrotis*male + 
+           modcoefs["macrotis:dist"]*macrotis*dist + modcoefs["male:dist"]*male*dist))
+  
+#LOW
+plogis(0.6431-(modcoefs["macrotis"]*macrotis + modcoefs["male"]*male + modcoefs["dist"]*dist +
+           modcoefs["wgt_s"]*wgt + modcoefs["macrotis:male"]*macrotis*male + 
+           modcoefs["macrotis:dist"]*macrotis*dist + modcoefs["male:dist"]*male*dist)) -
+plogis(-5.6329-(modcoefs["macrotis"]*macrotis + modcoefs["male"]*male + modcoefs["dist"]*dist +
+           modcoefs["wgt_s"]*wgt + modcoefs["macrotis:male"]*macrotis*male + 
+           modcoefs["macrotis:dist"]*macrotis*dist + modcoefs["male:dist"]*male*dist))
+
+#MEDIUM
+plogis(2.2457-(modcoefs["macrotis"]*macrotis + modcoefs["male"]*male + modcoefs["dist"]*dist +
+          modcoefs["wgt_s"]*wgt + modcoefs["macrotis:male"]*macrotis*male + 
+          modcoefs["macrotis:dist"]*macrotis*dist + modcoefs["male:dist"]*male*dist)) -
+plogis(0.6431-(modcoefs["macrotis"]*macrotis + modcoefs["male"]*male + modcoefs["dist"]*dist +
+            modcoefs["wgt_s"]*wgt + modcoefs["macrotis:male"]*macrotis*male + 
+            modcoefs["macrotis:dist"]*macrotis*dist + modcoefs["male:dist"]*male*dist))
+
+#HIGH
+1-plogis(
+  2.2457-(modcoefs["macrotis"]*macrotis + modcoefs["male"]*male + modcoefs["dist"]*dist +
+            modcoefs["wgt_s"]*wgt + modcoefs["macrotis:male"]*macrotis*male + 
+            modcoefs["macrotis:dist"]*macrotis*dist + modcoefs["male:dist"]*male*dist) )
+
   
 
 ## Comparison of counts ---
@@ -896,60 +966,60 @@ ecto_df<-rats4%>%filter(!is.na(Ectoparasite.Load))%>%
           dplyr::group_by(Species,Ectoparasite.Load,dist,.drop=FALSE)%>%dplyr::summarize(count=n())
   
 ecto_df<-ecto_df%>%group_by(Species,dist, .drop=FALSE)%>%dplyr::summarize(total=sum(count))  %>%
-          right_join(.,ecto_df)%>%mutate(diff=total-count)
+          right_join(.,ecto_df)%>% mutate(diff=total-count)
 
 ## DISTANCE 0
  # "NONE"
 with(ecto_df %>% filter(dist==0 & Ectoparasite.Load=="None"), 
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
  # "LOW"
 with(ecto_df %>% filter(dist==0 & Ectoparasite.Load=="Low"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## **
+     fisher_test(as.table(cbind(count,diff)) ) )     ## **
 
  # "MEDIUM"
 with(ecto_df %>% filter(dist==0 & Ectoparasite.Load=="Medium"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## **
+     fisher_test(as.table(cbind(count,diff)) ) )     ## **
 
  # "HIGH"
 with(ecto_df %>% filter(dist==0 & Ectoparasite.Load=="High"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 ## DISTANCE 1
   # "NONE"
 with(ecto_df %>% filter(dist==1 & Ectoparasite.Load=="None"), 
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
  # "LOW"
 with(ecto_df %>% filter(dist==1 & Ectoparasite.Load=="Low"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ****
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ****
 
  # "MEDIUM"
 with(ecto_df %>% filter(dist==1 & Ectoparasite.Load=="Medium"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## **
+     fisher_test(as.table(cbind(count,diff)) ) )     ## **
 
  # "HIGH"
 with(ecto_df %>% filter(dist==1 & Ectoparasite.Load=="High"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## **
+     fisher_test(as.table(cbind(count,diff)) ) )     ## **
 
 
 ## DISTANCE 2
 
    # "NONE"
 with(ecto_df %>% filter(dist==2 & Ectoparasite.Load=="None"), 
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
  # "LOW"
 with(ecto_df %>% filter(dist==2 & Ectoparasite.Load=="Low"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
  # "MEDIUM"
 with(ecto_df %>% filter(dist==2 & Ectoparasite.Load=="Medium"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
  # "HIGH"
 with(ecto_df %>% filter(dist==2 & Ectoparasite.Load=="High"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 
 ## Sex-species
@@ -1013,110 +1083,111 @@ ecto_df_sex<-ecto_df_sex%>%group_by(Species,dist,Sex,.drop=FALSE)%>%dplyr::summa
 ## DISTANCE 0
 # "NONE"
 with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==0 & Ectoparasite.Load=="None"), 
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "LOW"
 with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==0 & Ectoparasite.Load=="Low"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "MEDIUM"
 with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==0 & Ectoparasite.Load=="Medium"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "HIGH"
 with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==0 & Ectoparasite.Load=="High"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 ## DISTANCE 1
 # "NONE"
 with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==1 & Ectoparasite.Load=="None"), 
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "LOW"
 with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==1 & Ectoparasite.Load=="Low"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "MEDIUM"
 with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==1 & Ectoparasite.Load=="Medium"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "HIGH"
 with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==1 & Ectoparasite.Load=="High"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 
 ## DISTANCE 2
 
 # "NONE"
 with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==2 & Ectoparasite.Load=="None"), 
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "LOW"
 with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==2 & Ectoparasite.Load=="Low"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "MEDIUM"
 with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==2 & Ectoparasite.Load=="Medium"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "HIGH"
 with(ecto_df_sex %>% filter(Species=="fuscipes" & dist==2 & Ectoparasite.Load=="High"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 ## macrotis
 
 ## DISTANCE 0
 # "NONE"
 with(ecto_df_sex %>% filter(Species=="macrotis" & dist==0 & Ectoparasite.Load=="None"), 
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "LOW"
 with(ecto_df_sex %>% filter(Species=="macrotis" & dist==0 & Ectoparasite.Load=="Low"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "MEDIUM"
 with(ecto_df_sex %>% filter(Species=="macrotis" & dist==0 & Ectoparasite.Load=="Medium"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "HIGH"
 with(ecto_df_sex %>% filter(Species=="macrotis" & dist==0 & Ectoparasite.Load=="High"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 ## DISTANCE 1
 # "NONE"
 with(ecto_df_sex %>% filter(Species=="macrotis" & dist==1 & Ectoparasite.Load=="None"), 
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "LOW"
 with(ecto_df_sex %>% filter(Species=="macrotis" & dist==1 & Ectoparasite.Load=="Low"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "MEDIUM"
 with(ecto_df_sex %>% filter(Species=="macrotis" & dist==1 & Ectoparasite.Load=="Medium"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "HIGH"
 with(ecto_df_sex %>% filter(Species=="macrotis" & dist==1 & Ectoparasite.Load=="High"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 
 ## DISTANCE 2
 
 # "NONE"
 with(ecto_df_sex %>% filter(Species=="macrotis" & dist==2 & Ectoparasite.Load=="None"), 
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "LOW"
 with(ecto_df_sex %>% filter(Species=="macrotis" & dist==2 & Ectoparasite.Load=="Low"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "MEDIUM"
 with(ecto_df_sex %>% filter(Species=="macrotis" & dist==2 & Ectoparasite.Load=="Medium"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
 
 # "HIGH"
 with(ecto_df_sex %>% filter(Species=="macrotis" & dist==2 & Ectoparasite.Load=="High"),
-     pairwise_fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+     fisher_test(as.table(cbind(count,diff)) ) )     ## ns
+
 
 
 
